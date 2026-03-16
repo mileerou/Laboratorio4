@@ -1,0 +1,171 @@
+/*
+ * main_ex2_rx_terminal_lab04.c
+ * Ejercicio 2 — Terminal UART: recepcion de cadenas + control LED
+ *
+ * INSTRUCCIONES:
+ *   1) Flashea este archivo como main.c.
+ *   2) Abre RealTerm: 115200, 8N1, activa "Send on Enter" = CR+LF.
+ *      En la pestana "Send" escribe el texto y presiona Enter.
+ *   3) Cada cadena que envias provoca N parpadeos del LED LD2,
+ *      donde N = longitud de la cadena.
+ *
+ * COMANDOS ESPECIALES (escribe exactamente, sin espacios extra):
+ *   ON   → LED encendido fijo
+ *   OFF  → LED apagado fijo
+ *   LEN  → responde por UART la longitud de la ultima cadena enviada
+ *
+ * OVERFLOW: si escribes 63+ chars sin Enter, se resetea el buffer
+ *           y llega "ERROR: overflow" por UART.
+ */
+
+#include "stm32f4xx.h"
+#include "uart_lab04.h"
+#include <stdint.h>
+
+/* LED LD2 en PA5 */
+#define LED_PIN   (1U << 5U)
+
+/* ------------------------------------------------------------------
+ * Delay software
+ * ------------------------------------------------------------------ */
+static void delay_ms(volatile uint32_t ms)
+{
+    while (ms--)
+    {
+        volatile uint32_t i = 5540U;
+        while (i--) {}
+    }
+}
+
+/* ------------------------------------------------------------------
+ * GPIO — LED
+ * ------------------------------------------------------------------ */
+static void led_init(void)
+{
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+    GPIOA->MODER &= ~(3U << (5U * 2U));
+    GPIOA->MODER |=  (1U << (5U * 2U));
+}
+
+static void led_on (void) { GPIOA->BSRR = LED_PIN; }
+static void led_off(void) { GPIOA->BSRR = (LED_PIN << 16U); }
+
+static void led_blink(uint32_t n)
+{
+    for (uint32_t i = 0; i < n; i++)
+    {
+        led_on();  delay_ms(200);
+        led_off(); delay_ms(200);
+    }
+}
+
+/* ------------------------------------------------------------------
+ * Utilidades de string (sin usar <string.h> para mantenerse en CMSIS)
+ * ------------------------------------------------------------------ */
+
+/* Longitud de cadena terminada en '\0' */
+static uint32_t str_len(const char *s)
+{
+    uint32_t n = 0;
+    while (s && s[n]) n++;
+    return n;
+}
+
+/* Comparacion exacta de dos cadenas */
+static int str_eq(const char *a, const char *b)
+{
+    uint32_t i = 0;
+    while (a[i] && b[i])
+    {
+        if (a[i] != b[i]) return 0;
+        i++;
+    }
+    return (a[i] == '\0' && b[i] == '\0');
+}
+
+/* ------------------------------------------------------------------
+ * Procesar cadena completa recibida
+ * ------------------------------------------------------------------ */
+static void process_line(char *buf, uint32_t *last_len)
+{
+    if (str_eq(buf, "ON"))
+    {
+        led_on();
+        uart2_write_str(">> OK: LED ON\r\n");
+    }
+    else if (str_eq(buf, "OFF"))
+    {
+        led_off();
+        uart2_write_str(">> OK: LED OFF\r\n");
+    }
+    else if (str_eq(buf, "LEN"))
+    {
+        uart2_write_str(">> LEN=");
+        uart2_write_u32(*last_len);
+        uart2_write_str("\r\n");
+    }
+    else
+    {
+        /* Regla principal: N parpadeos = longitud de la cadena */
+        *last_len = str_len(buf);
+        uart2_write_str(">> Blink ");
+        uart2_write_u32(*last_len);
+        uart2_write_str(" veces\r\n");
+        led_blink(*last_len);
+        uart2_write_str(">> Listo.\r\n");
+    }
+}
+
+/* ==================================================================
+ * main
+ * ================================================================== */
+int main(void)
+{
+    led_init();
+    uart2_init(115200UL, 1);    /* 1 = habilitar RX tambien */
+
+    /* Mensaje de bienvenida */
+    uart2_write_str("\r\n=== Lab04 | Terminal UART ===\r\n");
+    uart2_write_str("Escribe una linea y presiona ENTER.\r\n");
+    uart2_write_str("Comandos: ON | OFF | LEN\r\n");
+    uart2_write_str("Cualquier otro texto parpadea el LED N veces.\r\n");
+    uart2_write_str("==============================\r\n\r\n");
+
+    char     buf[64];       /* buffer de recepcion */
+    uint32_t idx      = 0;  /* indice actual en el buffer */
+    uint32_t last_len = 0;  /* longitud de la ultima cadena procesada */
+
+    while (1)
+    {
+        char c = uart2_read_char_blocking();
+
+        /* Eco: reenviar el caracter recibido para verlo en RealTerm */
+        uart2_write_char(c);
+
+        if (c == '\r' || c == '\n')
+        {
+            /* Fin de linea — procesar la cadena acumulada */
+            uart2_write_str("\r\n");    /* nueva linea en terminal */
+            buf[idx] = '\0';
+
+            if (idx > 0)               /* ignorar lineas vacias */
+                process_line(buf, &last_len);
+
+            idx = 0;                   /* resetear para siguiente cadena */
+        }
+        else
+        {
+            /* Caracter normal — guardar en buffer */
+            if (idx < (sizeof(buf) - 1U))
+            {
+                buf[idx++] = c;
+            }
+            else
+            {
+                /* Buffer lleno sin haber recibido Enter = overflow */
+                idx = 0;
+                uart2_write_str("\r\nERROR: overflow — buffer reseteado\r\n");
+            }
+        }
+    }
+}
