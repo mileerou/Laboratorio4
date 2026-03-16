@@ -1,0 +1,129 @@
+/*
+ * main_ex1_baud_bench_lab04.c
+ * Ejercicio 1 — Bench experimental de Baud Rate
+ *
+ * INSTRUCCIONES:
+ *   1) Cambia BENCH_BAUD al baud que quieres probar: 9600 / 19200 / 38400 / 115200
+ *   2) Compila y flashea.
+ *   3) Abre RealTerm con el MISMO baud, 8N1, puerto COM del ST-LINK.
+ *   4) Deberias ver lineas [A] (texto plano) y [B] (frame binario) cada 500 ms.
+ *   5) Para el caso malo: deja firmware en 115200 pero pon RealTerm en 9600
+ *      y observa los caracteres basura.
+ *
+ * LED LD2 (PA5) parpadea en cada ciclo para confirmar que el micro
+ * sigue vivo incluso cuando la UART esta mal configurada.
+ */
+
+#include "stm32f4xx.h"
+#include "uart_lab04.h"
+#include <stdint.h>
+
+/* ============================================================
+ *  CAMBIA ESTE VALOR para cada prueba del bench:
+ *     9600   19200   38400   115200
+ * ============================================================ */
+#define BENCH_BAUD   115200UL
+
+/* LED LD2 en PA5 */
+#define LED_PIN   (1U << 5U)
+
+/* ------------------------------------------------------------------
+ * Delay software  (~1 ms a 16 MHz HSI, calibrado a ojo)
+ * ------------------------------------------------------------------ */
+static void delay_ms(volatile uint32_t ms)
+{
+    while (ms--)
+    {
+        volatile uint32_t i = 5540U;
+        while (i--) {}
+    }
+}
+
+/* ------------------------------------------------------------------
+ * GPIO — LED
+ * ------------------------------------------------------------------ */
+static void led_init(void)
+{
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+    GPIOA->MODER &= ~(3U << (5U * 2U));
+    GPIOA->MODER |=  (1U << (5U * 2U));   /* output push-pull */
+}
+
+static void led_toggle(void) { GPIOA->ODR ^= LED_PIN; }
+
+/* ------------------------------------------------------------------
+ * Modo B — enviar frame con protocolo minimo
+ *
+ * Formato: [STX=0x02][LEN][...payload...][CHK=XOR(LEN^payload)][ETX=0x03]\r\n
+ *
+ * CHK se calcula haciendo XOR de LEN con cada byte del payload.
+ * El receptor recalcula el XOR y compara; si difiere = datos corruptos.
+ * ------------------------------------------------------------------ */
+static void send_frame(const char *payload)
+{
+    const uint8_t STX = 0x02U;
+    const uint8_t ETX = 0x03U;
+
+    uint8_t len = 0;
+    while (payload[len] && len < 50U) len++;
+
+    uart2_write_char((char)STX);
+    uart2_write_char((char)len);
+
+    uint8_t chk = len;                    /* XOR inicial con LEN */
+    for (uint8_t i = 0; i < len; i++)
+    {
+        uart2_write_char(payload[i]);
+        chk ^= (uint8_t)payload[i];
+    }
+
+    uart2_write_char((char)chk);
+    uart2_write_char((char)ETX);
+    uart2_write_str("\r\n");
+}
+
+/* ------------------------------------------------------------------
+ * Construir "CNT=NNNNNN"  (10 chars + '\0', ceros a la izquierda)
+ * ------------------------------------------------------------------ */
+static void build_cnt_str(char *out, uint32_t v)
+{
+    out[0]='C'; out[1]='N'; out[2]='T'; out[3]='=';
+    out[4]='0'; out[5]='0'; out[6]='0'; out[7]='0'; out[8]='0'; out[9]='0';
+    out[10]='\0';
+    for (int i = 9; i >= 4 && v > 0; i--) { out[i]=(char)('0'+(v%10U)); v/=10U; }
+}
+
+/* ==================================================================
+ * main
+ * ================================================================== */
+int main(void)
+{
+    led_init();
+    uart2_init(BENCH_BAUD, 0);    /* 0 = solo TX (bench no necesita RX) */
+
+    /* Banner de inicio */
+    uart2_write_str("\r\n=== Lab04 | Bench Baud Rate ===\r\n");
+    uart2_write_str("Baud configurado: ");
+    uart2_write_u32(BENCH_BAUD);
+    uart2_write_str(" | 8N1\r\n");
+    uart2_write_str("Modo A = raw     Modo B = frame\r\n");
+    uart2_write_str("================================\r\n\r\n");
+
+    uint32_t cnt = 0;
+
+    while (1)
+    {
+        /* ── Modo A: raw — secuencia fija, facil de reconocer ── */
+        uart2_write_str("[A] 0123456789ABCDEF\r\n");
+
+        /* ── Modo B: frame — prefijo legible + trama binaria ─── */
+        char msg[11];
+        build_cnt_str(msg, cnt);
+        uart2_write_str("[B] frame: ");
+        send_frame(msg);
+
+        led_toggle();
+        cnt++;
+        delay_ms(500);
+    }
+}
